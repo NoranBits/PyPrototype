@@ -9,7 +9,8 @@ https://docs.djangoproject.com/en/5.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
-
+import os
+from dotenv import load_dotenv
 from pathlib import Path
 import logging
 
@@ -81,16 +82,16 @@ WSGI_APPLICATION = 'legislative_dashboard.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'legislative_data',  
-        'USER': 'postgres',    
-        'PASSWORD': 'password',
-        'HOST': 'localhost',   
-        'PORT': '5432',
-    }
-}
+# Load environment variables from .env file
+load_dotenv()
+
+DATABASE_ENGINE = os.getenv('DATABASE_ENGINE')
+DATABASE_NAME = os.getenv('DATABASE_NAME')
+DATABASE_USER = os.getenv('DATABASE_USER')
+DATABASE_PASSWORD = os.getenv('DATABASE_PASSWORD')
+DATABASE_HOST = os.getenv('DATABASE_HOST')
+DATABASE_PORT = int(os.getenv('DATABASE_PORT', 5432))
+
 ITEM_PIPELINES = {
     'legislative_scraper.pipelines.PostgresPipeline': 300,
 }

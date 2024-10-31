@@ -1,81 +1,94 @@
-# legislative_scraper/pipelines.py
 import psycopg2
-from legislative_scraper.items import BillItem, BillDetailItem, VoteItem
-import logging
+from legislative_scraper.items import BillItem, BillDetailItem
+from scrapy.exceptions import NotConfigured
+import os
+from dotenv import load_dotenv
 
 class PostgresPipeline:
     def open_spider(self, spider):
-        self.connection = psycopg2.connect(
-            dbname='legislative_data',
-            user='postgres',
-            password='password',
-            host='localhost',
-            port='5432'
-        )
-        self.cursor = self.connection.cursor()
-        logging.info("Database connection opened.")
+        # Load environment variables
+        load_dotenv()
+        try:
+            self.connection = psycopg2.connect(
+                host=os.getenv('DATABASE_HOST'),
+                port=int(os.getenv('DATABASE_PORT')),
+                user=os.getenv('DATABASE_USER'),
+                password=os.getenv('DATABASE_PASSWORD'),
+                dbname=os.getenv('DATABASE_NAME')
+            )
+            self.cursor = self.connection.cursor()
+        except Exception as e:
+            spider.logger.error(f"Failed to connect to database: {e}")
+            raise NotConfigured("Database connection failed")
 
     def close_spider(self, spider):
-        self.cursor.close()
-        self.connection.close()
-        logging.info("Database connection closed.")
+        if hasattr(self, 'cursor'):
+            self.cursor.close()
+        if hasattr(self, 'connection'):
+            self.connection.close()
 
     def process_item(self, item, spider):
-        try:
-            if isinstance(item, BillItem):
+        if isinstance(item, BillItem):
+            try:
+                # Safely convert sponsor_id to integer or set to None
+                sponsor_id_raw = item.get('sponsor_id')
+                sponsor_id = int(sponsor_id_raw) if sponsor_id_raw and sponsor_id_raw.strip().isdigit() else None
+
+                values = (
+                    item.get('bill_number'),
+                    item.get('parliament_number'),
+                    item.get('session_number'),
+                    item.get('bill_stage') or None,
+                    item.get('bill_stage_date') or None,
+                    sponsor_id,
+                    item.get('sponsor_name') or None,
+                    item.get('sponsor_role') or None
+                )
+
+                # Log the values for debugging
+                spider.logger.debug(f"Inserting BillItem with values: {values}")
+
+                # Execute the SQL statement
                 self.cursor.execute('''
-                    INSERT INTO bills (number_code, parliament_number, session_number, bill_history, latest_completed_stage, division_number, bill_stage, date, current_stage)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (number_code, parliament_number, session_number) DO NOTHING
-                ''', (
-                    item['number_code'],
-                    item['parliament_number'],
-                    item['session_number'],
-                    item['bill_history'],
-                    item['latest_completed_stage'],
-                    item['division_number'],
-                    item['bill_stage'],
-                    item['date'],
-                    item['current_stage']
-                ))
-            elif isinstance(item, BillDetailItem):
-                self.cursor.execute('''
-                    INSERT INTO bill_details (bill_number, bill_number_prefix, parliament_number, session_number, title, short_title, sponsor, bill_ref_number, bill_history, introduction, body, division_number)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO bills (
+                        bill_number, parliament_number, session_number, bill_stage, bill_stage_date,
+                        sponsor_id, sponsor_name, sponsor_role
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (bill_number, parliament_number, session_number) DO NOTHING
-                ''', (
-                    item['bill_number'],
-                    item['bill_number_prefix'],
-                    item['parliament_number'],
-                    item['session_number'],
-                    item['title'],
-                    item['short_title'],
-                    item['sponsor'],
-                    item['bill_ref_number'],
-                    item['bill_history'],
-                    item['introduction'],
-                    item['body'],
-                    item['division_number']
-                ))
-            elif isinstance(item, VoteItem):
+                ''', values)
+
+                self.connection.commit()
+            except Exception as e:
+                # Rollback the transaction to reset the database state
+                self.connection.rollback()
+                spider.logger.error(f"Error inserting BillItem: {e}")
+                spider.logger.debug(f"Values attempted: {values}")
+        elif isinstance(item, BillDetailItem):
+            try:
+                values = (
+                    item.get('bill_number'),
+                    item.get('parliament_number'),
+                    item.get('session_number'),
+                    item.get('title'),
+                    item.get('short_title'),
+                    item.get('sponsor'),
+                    item.get('bill_ref_number'),
+                    item.get('bill_history'),
+                    item.get('introduction'),
+                    item.get('body'),
+                )
+
+                # Execute the SQL statement
                 self.cursor.execute('''
-                    INSERT INTO bill_votes (parliament_number, session_number, description, decision, related_bill_number, total_yeas, total_nays, total_abstain, vote_date, division_number)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (related_bill_number, parliament_number, session_number, vote_date) DO NOTHING
-                ''', (
-                    item['parliament_number'],
-                    item['session_number'],
-                    item['description'],
-                    item['decision'],
-                    item['related_bill_number'],
-                    item['total_yeas'],
-                    item['total_nays'],
-                    item['total_abstain'],
-                    item['vote_date'],
-                    item['division_number']
-                ))
-            self.connection.commit()
-        except psycopg2.Error as e:
-            logging.error(f"Error processing item: {e}")
-            self.connection.rollback()
+                    INSERT INTO bill_details (
+                        bill_number, parliament_number, session_number, title, short_title, sponsor,
+                        bill_ref_number, bill_history, introduction, body
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (bill_number, parliament_number, session_number) DO NOTHING
+                ''', values)
+                self.connection.commit()
+            except Exception as e:
+                spider.logger.error(f"Error inserting BillDetailItem: {e}")
+                spider.logger.debug(f"Values attempted: {values}")
+                raise e  # Optionally re-raise the exception
         return item

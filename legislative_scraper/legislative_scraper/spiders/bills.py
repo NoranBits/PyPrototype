@@ -1,18 +1,18 @@
 import scrapy
 import xml.etree.ElementTree as ET
 from scrapy.http import Request
-from legislative_scraper.items import BillItem, BillDetailItem, VoteItem
+from legislative_scraper.items import BillItem, BillDetailItem
 
 BASE_URL = "https://www.parl.ca"
 BILLS_LIST_URL = f"{BASE_URL}/legisinfo/en/bills/xml?parlsession={{parliament}}-{{session}}"
-BILL_DATA_URL = f"{BASE_URL}/LegisInfo/en/bill/{{parliament}}-{{session}}/{{number_code}}/xml"
-BILL_DETAILS_URL = f"{BASE_URL}/Content/Bills/{{parliament}}{{session}}/{{bill_type}}/{{number_code}}/{{number_code}}_{{count}}/{{number_code}}_E.xml"
-
+BILL_DATA_URL = f"{BASE_URL}/LegisInfo/en/bill/{{parliament}}-{{session}}/{{bill_number}}/xml"
+BILL_DETAILS_URL = f"{BASE_URL}/Content/Bills/{{parliament}}{{session}}/{{bill_type}}/{{bill_number}}/{{bill_number}}_{{count}}/{{bill_number}}_E.xml"
+BILL_VOTES_URL = f"https://www.ourcommons.ca/Members/en/votes/xml?parlSession={{parliament}}/{{session}}"
 class BillSessionSpider(scrapy.Spider):
     name = "bill_session"
-    allowed_domains = ["parl.ca"]
+    allowed_domains = ["parl.ca", "ourcommons.ca"]
     max_parliaments = 1000  # Optional limit for parliaments
-    max_sessions = 5  # Optional limit for sessions
+    max_sessions = 4  # Optional limit for sessions
     max_counts = 100  # Optional limit for counts
 
     def start_requests(self):
@@ -55,24 +55,28 @@ class BillSessionSpider(scrapy.Spider):
                 return
 
             for bill in bills:
-                number_code = bill.findtext("NumberCode")
-                if not number_code:
-                    self.logger.warning(f"No NumberCode found for a bill in Parliament {parliament}, Session {session}.")
+                bill_number = bill.findtext("NumberCode")
+                if not bill_number:
+                    self.logger.warning(f"No bill number found for a bill in Parliament {parliament}, Session {session}.")
                     continue
 
                 # Prepare bill data
                 bill_data = {
-                    'number_code': number_code,
+                    'bill_number': bill_number,
                     'parliament_number': parliament,
                     'session_number': session,
-                    'latest_completed_stage_en': bill.findtext("LatestCompletedStage")
+                    'bill_stage': bill.findtext("LatestCompletedBillStageName"),
+                    'bill_stage_date': bill.findtext("LatestCompletedBillStageDateTime"),
+                    'sponsor_id': bill.findtext("SponsorPersonId"),
+                    'sponsor_name': bill.findtext("SponsorPersonName"),
+                    'sponsor_role': bill.findtext("SponsorAffiliationRoleName")
                 }
 
                 # Generate the bill data URL
                 bill_data_url = BILL_DATA_URL.format(
                     parliament=parliament,
                     session=session,
-                    number_code=number_code
+                    bill_number=bill_number
                 )
                 self.logger.info(f"Generated Bill Data URL: {bill_data_url}")
                 yield Request(
@@ -97,7 +101,7 @@ class BillSessionSpider(scrapy.Spider):
         # Extract variables from bill_data
         parliament = bill_data['parliament_number']
         session = bill_data['session_number']
-        number_code = bill_data['number_code']
+        bill_number = bill_data['bill_number']
 
         for bill_type in ['Government', 'Private']:
             count = 1  # Start with the first version
@@ -105,7 +109,7 @@ class BillSessionSpider(scrapy.Spider):
                 parliament=parliament,
                 session=session,
                 bill_type=bill_type,
-                number_code=number_code,
+                bill_number=bill_number,
                 count=count
             )
             self.logger.info(f"Generated Bill Details URL: {bill_details_url}")
@@ -130,56 +134,28 @@ class BillSessionSpider(scrapy.Spider):
 
         try:
             root = ET.fromstring(response.text)
-            bill_stage = root.find(".//LatestCompletedMajorStageName")
-            division_number = root.findtext(".//DivisionNumber")
 
-            # Extract the date
-            date = root.findtext(".//LatestCompletedBillStageDateTime")
+            # Extract the bill stage and sponsor details
+            bill_stage = root.findtext(".//LatestCompletedBillStageName")
+            bill_stage_date = root.findtext(".//LatestCompletedBillStageDateTime")
+            sponsor_id = root.findtext(".//SponsorPersonId")
+            sponsor_name = root.findtext(".//SponsorPersonName")
+            sponsor_role = root.findtext(".//SponsorAffiliationTitle") 
 
-            # Extract the current stage
-            current_stage = root.findtext(".//LatestCompletedBillStageName")
-
-            # Extract voting data if the bill is accepted
-            voting_data = []
-            if root.findtext(".//ReceivedRoyalAssent") == "true":
-                votes = root.findall(".//Vote")
-                for vote in votes:
-                    vote_item = VoteItem(
-                        parliament_number=bill_data['parliament_number'],
-                        session_number=bill_data['session_number'],
-                        description=vote.findtext("Description"),
-                        decision=vote.findtext("Decision"),
-                        related_bill_number=bill_data['number_code'],
-                        total_yeas=vote.findtext("TotalYeas"),
-                        total_nays=vote.findtext("TotalNays"),
-                        total_abstain=vote.findtext("TotalAbstain"),
-                        vote_date=vote.findtext("VoteDate"),
-                        division_number=division_number
-                    )
-                    voting_data.append(vote_item)
 
             bill_item = BillItem(
-                number_code=bill_data['number_code'],
+                bill_number=bill_data['bill_number'],
                 parliament_number=bill_data['parliament_number'],
                 session_number=bill_data['session_number'],
-                bill_stage=ET.tostring(bill_stage, encoding='unicode') if bill_stage is not None else None,
-                latest_completed_stage=bill_data.get('latest_completed_stage_en'),
-                division_number=division_number,
-                date=date,
-                current_stage=current_stage,
-                bill_history=current_stage,  # Use LatestCompletedBillStageName as bill_history
-                voting_data=voting_data
+                sponsor_id=sponsor_id,
+                sponsor_name=sponsor_name,
+                sponsor_role=sponsor_role,
+                bill_stage=bill_stage,
+                bill_stage_date=bill_stage_date
             )
 
-            if not division_number:
-                self.logger.warning(f"'DivisionNumber' not found for Bill: {bill_item['number_code']}")
-
-            self.logger.info(f"Extracted data for Bill: {bill_item['number_code']}")
+            self.logger.info(f"Extracted data for Bill: {bill_item['bill_number']}")
             yield bill_item
-
-            # Yield voting data items
-            for vote_item in voting_data:
-                yield vote_item
 
         except ET.ParseError as e:
             self.logger.error(f"Failed to parse XML for Bill Data: {e}")
@@ -200,15 +176,12 @@ class BillSessionSpider(scrapy.Spider):
             if identification is not None:
                 bill_detail_item = BillDetailItem(
                     bill_number=identification.findtext("BillNumber"),
-                    bill_number_prefix=identification.findtext("BillNumberPrefix"),
-                    parliament_number=identification.findtext("Parliament/Number"),
                     session_number=identification.findtext("Parliament/Session"),
                     title=identification.findtext("LongTitle"),
                     short_title=identification.findtext("ShortTitle"),
                     sponsor=identification.findtext("BillSponsor"),
                     bill_ref_number=identification.findtext("BillRefNumber"),
                     bill_history=ET.tostring(root.find(".//BillHistory"), encoding='unicode') if root.find(".//BillHistory") else None,
-                    division_number=bill_data.get('division_number'),
                     introduction=ET.tostring(root.find(".//Introduction"), encoding='unicode') if root.find(".//Introduction") else None,
                     body=ET.tostring(root.find(".//Body"), encoding='unicode') if root.find(".//Body") else None,
                 )
@@ -226,13 +199,13 @@ class BillSessionSpider(scrapy.Spider):
         if next_count <= self.max_counts:
             parliament = bill_data['parliament_number']
             session = bill_data['session_number']
-            number_code = bill_data['number_code']
+            bill_number = bill_data['bill_number']
 
             next_bill_details_url = BILL_DETAILS_URL.format(
                 parliament=parliament,
                 session=session,
                 bill_type=bill_type,
-                number_code=number_code,
+                bill_number=bill_number,
                 count=next_count
             )
 
@@ -254,16 +227,16 @@ class BillSessionSpider(scrapy.Spider):
                     errback=self.handle_bill_details_error
                 )
             else:
-                self.logger.info(f"Stopping further requests for Bill {number_code}, Bill Type {bill_type}, due to status {response.status}")
+                self.logger.info(f"Stopping further requests for Bill {bill_number}, Bill Type {bill_type}, due to status {response.status}")
         else:
-            self.logger.info(f"Reached max counts for Bill {number_code}, Bill Type {bill_type}")
+            self.logger.info(f"Reached max counts for Bill {bill_number}, Bill Type {bill_type}")
 
     def handle_bill_details_error(self, failure):
         response = failure.value.response
         bill_data = response.meta['bill_data']
         bill_type = response.meta['bill_type']
         count = response.meta['count']
-        number_code = bill_data['number_code']
+        bill_number = bill_data['bill_number']
 
         if response.status in [404, 301, 302]:
             self.logger.info(f"Received status {response.status} for Bill Details URL: {response.url}. No further requests for this bill version.")
